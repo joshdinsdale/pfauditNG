@@ -20,74 +20,100 @@ import argparse
 import base64
 import tempfile
 import collections
+import logging
 
 from optparse import OptionParser
-from scp import SCPClient
 from copy import deepcopy
+from cryptography.fernet import Fernet
 
 verbose_mode = False
 json_output = False
 log_file = None
 changes_list = []
 
-def load_ssh_key(f, p = None):
+def load_ssh_key(f, p=None):
 
     ''' Load a SSH key
-        f = SSH RSA private key file
+        f = SSH private key file
         p = Key passphrase
     '''
 
     try:
-        f = open(f,'r')
+        with open(f, 'r') as key_file:
+            key_data = key_file.read().strip()
     except IOError as e:
-        print(e)
+        print(f"[ERROR] Cannot read SSH key file: {e}")
         sys.exit(1)
-    private_key_file = io.StringIO()
-    private_key_file.write(f.read().strip())
-    private_key_file.seek(0)
-    key = paramiko.RSAKey.from_private_key(private_key_file, password=p)
+        
+    private_key_file = io.StringIO(key_data)
+    
+    try:
+        # First, try to load it as a modern Ed25519 key (most likely)
+        key = paramiko.Ed25519Key.from_private_key(private_key_file, password=p)
+    except Exception:
+        # If it fails, reset the file pointer and try old-school RSA
+        private_key_file.seek(0)
+        try:
+            key = paramiko.RSAKey.from_private_key(private_key_file, password=p)
+        except Exception:
+            # Finally, try ECDSA
+            private_key_file.seek(0)
+            key = paramiko.ECDSAKey.from_private_key(private_key_file, password=p)
+            
+    return key
+def get_encryption_key():
+    ''' Generates or loads a secure Fernet encryption key 
+        for local cache files.
+    '''
+    key_file = ".pfaudit_cache.key"
+    if not os.path.exists(key_file):
+        # Generate a new secure key and save it
+        key = Fernet.generate_key()
+        with open(key_file, 'wb') as f:
+            f.write(key)
+        # Lock down file permissions (read/write for owner only)
+        os.chmod(key_file, 0o600) 
+    else:
+        # Load existing key
+        with open(key_file, 'rb') as f:
+            key = f.read()
     return key
 
-def xor(f, d, k):
-
-    ''' XOR/Base64 a config file with the provided key
-        and save it on disk
+def encrypt_config(f, d):
+    ''' Encrypt a config file string with AES (Fernet)
+        and save it to disk.
     '''
-
-    data = d.encode()
-    key = k.encode()
-    l = len(key)
-    xdata = bytes((data[i] ^ key[i % l]) for i in range(0,len(data)))
-        
+    key = get_encryption_key()
+    fernet = Fernet(key)
+    encrypted_data = fernet.encrypt(d.encode('utf-8'))
+    
     try:
-        f = open(f, 'wb')
-        f.write(base64.b64encode(xdata))
-        f.close()
+        with open(f, 'wb') as out_file:
+            out_file.write(encrypted_data)
+        os.chmod(f, 0o600) # Lock down the cache file permissions
+        return True
     except IOError as e:
-        print(e)
+        print(f"[ERROR] Cannot save encrypted config cache: {e}")
         return False
-    return True
 
-def unxor(f, k):
-
-    ''' XOR a config file with the hostname as key
-        and return the XML content
-        Return unencrypted data or None if file can't open
+def decrypt_config(f):
+    ''' Decrypt a local config cache file and return the XML content.
+        Returns unencrypted data (bytes) or None if file doesn't exist.
     '''
-
-    try:
-        with open(f, 'rb') as xml_file:
-            data = xml_file.read()
-    except IOError as e:
-        print(e)
+    if not os.path.exists(f):
         return None
-    data = base64.b64decode(data)
-    key = k.encode()
-    l = len(key)
-    data = bytes((data[i] ^ key[i % l]) for i in range(0,len(data)))
-    xml_file.close()
-    return data
-
+        
+    key = get_encryption_key()
+    fernet = Fernet(key)
+    
+    try:
+        with open(f, 'rb') as in_file:
+            encrypted_data = in_file.read()
+        decrypted_data = fernet.decrypt(encrypted_data)
+        return decrypted_data
+    except Exception as e:
+        print(f"[ERROR] Cannot decrypt local cache (key mismatch or corrupt file): {e}")
+        return None
 def log(m):
 
     ''' Log a message
@@ -159,7 +185,7 @@ def process_firewall(host, user, key, passphrase):
 
     ''' Search for changes in a firewall configuration
     '''
-    
+
     global json_output
     global log_file
 
@@ -167,23 +193,27 @@ def process_firewall(host, user, key, passphrase):
     try:
         ssh = paramiko.SSHClient()
         ssh.load_system_host_keys()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
         ssh.connect(host, username=user, pkey=load_ssh_key(key, passphrase))
-    except:
-        print("Cannot connect to %s@%s." % (user, host))
-        return 1 
-        
-    temp_file = tempfile.mktemp()
+    except Exception as e:
+        print(f"\n[SSH CONNECTION ERROR] Failed to connect: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+#    temp_file = tempfile.mktemp()
+    fd, temp_file = tempfile.mkstemp()
+    os.close(fd)
     log("Dumping configuration to %s" % temp_file)
     try:
-        with SCPClient(ssh.get_transport()) as scp:
-            scp.get('/cf/conf/config.xml', temp_file) 
-    except:
-        print("Cannot download configuration XML file.")
-        ssh.close()
-        return 1
-    ssh.close()
+        sftp = ssh.open_sftp()
+        sftp.get('/cf/conf/config.xml', temp_file)
+        sftp.close()
 
+    except Exception as e:
+        print(f"\n[CRITICAL ERROR] The script crashed here: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
     log("Processing %s" % temp_file)
     with open(temp_file) as xml_file:
         data = xml_file.read()
@@ -191,10 +221,9 @@ def process_firewall(host, user, key, passphrase):
         hash_object = hashlib.sha256(str(data_dict_new).encode())
         sha256_hash_new = hash_object.hexdigest()
     xml_file.close()
-
-    hostname = data_dict_new['pfsense']['system']['hostname'];
+    hostname = data_dict_new['pfsense']['system']['hostname']
     log("Firewall hostname: %s" % hostname)
-    d = unxor(host + ".conf", hostname)
+    d = decrypt_config(host + ".conf")
     if d == None:
         # Cannot read old config, 1st execution?
         log("Cannot load the previous configuration")
@@ -207,7 +236,7 @@ def process_firewall(host, user, key, passphrase):
 
     rc = 0
     log("Writing encrypted configuration to %s.conf" % host)
-    if xor(host + ".conf", data, hostname) == True:
+    if encrypt_config(host + ".conf", data) == True:
         log("Comparing configurations: Old SHA256: %s, New SHA256: %s" % (sha256_hash, sha256_hash_new))
         if sha256_hash != sha256_hash_new:
             xml_dict = data_dict;
@@ -242,6 +271,7 @@ def process_firewall(host, user, key, passphrase):
         rc = 1
 
     os.unlink(temp_file)
+    ssh.close()
     return rc
 
 def main(argv):
