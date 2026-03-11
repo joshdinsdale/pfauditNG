@@ -24,7 +24,7 @@ This is a modernized and actively maintained fork of the original `xameco-be/pfa
 
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/YOUR_USERNAME/pfaudit.git](https://github.com/YOUR_USERNAME/pfaudit.git)
+   git clone https://github.com/joshdinsdale/pfauditNG.git
    cd pfaudit
    ```
 2. Install the required Python dependencies:
@@ -69,5 +69,5 @@ To detect changes, `pfaudit` must remember what your firewall looked like during
 
 ## 📄 License & Credits
 * Original Author: Xavier Mertens (<xavier@rootshell.be>)
-* Modernized by: [Your Name/Handle]
+* Modernized by: [joshdinsdale]
 * License: GPLv3
