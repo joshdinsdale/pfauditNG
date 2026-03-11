@@ -69,5 +69,5 @@ To detect changes, `pfaudit` must remember what your firewall looked like during
 
 ## 📄 License & Credits
 * Original Author: Xavier Mertens (<xavier@rootshell.be>)
-* Modernized by: [joshdinsdale]
+* Modernized by: joshdinsdale
 * License: GPLv3
